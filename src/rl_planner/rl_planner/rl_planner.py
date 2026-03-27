@@ -11,7 +11,7 @@ import torch
 import os
 import time
 from ament_index_python.packages import get_package_share_directory
-from std_msgs.msg import Float32, Header
+from std_msgs.msg import Bool, Float32, Header
 from nav_msgs.msg import OccupancyGrid, Odometry
 from geometry_msgs.msg import Point, PointStamped
 from visualization_msgs.msg import Marker
@@ -120,6 +120,7 @@ class Runner(Node):
         
         self.waypoint_pub = self.create_publisher(PointStamped, '/way_point', 10)
         self.run_time_pub = self.create_publisher(Float32, '/runtime', 10)
+        self.exploration_finish_pub = self.create_publisher(Bool, 'exploration_finish', 10)
         self.edge_pub = self.create_publisher(Marker, '/edge', 10)
         self.node_pub = self.create_publisher(PointCloud2, '/node', 10)
         self.frontier_pub = self.create_publisher(PointCloud2, '/frontier', 10)
@@ -139,7 +140,9 @@ class Runner(Node):
             return 
         t1 = time.time()
         if self.done:
+            self.publish_exploration_state()
             return
+        self.publish_exploration_state()
 
         if self.save_mode:
             if np.linalg.norm(self.next_waypoint - self.robot_location) > parameter.THR_TO_WAYPOINT:
@@ -205,6 +208,7 @@ class Runner(Node):
             run_time = Float32()
             run_time.data = 0.0
             self.run_time_pub.publish(run_time)
+            self.publish_exploration_state()
             return
 
         t2 = time.time()
@@ -306,6 +310,11 @@ class Runner(Node):
         way_point.point.x = loc[0]
         way_point.point.y = loc[1]
         return way_point
+
+    def publish_exploration_state(self):
+        exploration_finished = Bool()
+        exploration_finished.data = self.done
+        self.exploration_finish_pub.publish(exploration_finished)
 
     def init_agent(self):
         policy_net = PolicyNet(parameter.NODE_INPUT_DIM, parameter.EMBEDDING_DIM).to(self.device)
