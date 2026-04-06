@@ -6,10 +6,6 @@ from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
-    ld_preload = SetEnvironmentVariable(
-        'LD_PRELOAD', '/usr/lib/x86_64-linux-gnu/libstdc++.so.6'
-    )
-    
     base_frame_arg = DeclareLaunchArgument(
         'base_frame',
         default_value='sensor',
@@ -88,7 +84,6 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
-        ld_preload,
         base_frame_arg,
         sensor_range_arg,
         map_resolution_arg,
