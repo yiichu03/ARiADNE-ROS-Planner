@@ -88,6 +88,20 @@ class Runner(Node):
         self.declare_parameter('replanning_frequency', 2.5)
         frequency = self.get_parameter('replanning_frequency').value
 
+        self.declare_parameter('enable_near_stuck_skip', False)
+        enable_near_stuck_skip = self.get_parameter('enable_near_stuck_skip').value
+        if isinstance(enable_near_stuck_skip, str):
+            enable_near_stuck_skip = enable_near_stuck_skip.lower() in ('true', '1', 'yes', 'on')
+        self.enable_near_stuck_skip = bool(enable_near_stuck_skip)
+        self.declare_parameter('near_stuck_distance', parameter.THR_TO_WAYPOINT)
+        self.near_stuck_distance = float(self.get_parameter('near_stuck_distance').value)
+        self.declare_parameter('near_stuck_timeout', 10.0)
+        self.near_stuck_timeout = float(self.get_parameter('near_stuck_timeout').value)
+        self.declare_parameter('near_stuck_min_progress', 0.15)
+        self.near_stuck_min_progress = float(self.get_parameter('near_stuck_min_progress').value)
+        self.declare_parameter('near_stuck_blacklist_duration', 45.0)
+        self.near_stuck_blacklist_duration = float(self.get_parameter('near_stuck_blacklist_duration').value)
+
         self.model_file = "checkpoint.pth"
 
         self.robot_location = None
@@ -99,6 +113,10 @@ class Runner(Node):
         self.next_waypoint = None
         self.done = False
         self.save_mode = False
+        self.blocked_waypoints = {}
+        self.near_stuck_waypoint_key = None
+        self.near_stuck_start_time = None
+        self.near_stuck_best_dist = None
 
         qos = QoSProfile(
             depth=10,
@@ -135,6 +153,97 @@ class Runner(Node):
         
         self.get_logger().info("RL Planner initialized")
 
+    def waypoint_key(self, waypoint):
+        if waypoint is None:
+            return None
+        waypoint = np.asarray(waypoint).reshape(-1)
+        return (round(float(waypoint[0]), 1), round(float(waypoint[1]), 1))
+
+    def prune_blocked_waypoints(self, now=None):
+        if now is None:
+            now = time.time()
+        expired_keys = [key for key, expire_time in self.blocked_waypoints.items()
+                        if expire_time <= now]
+        for key in expired_keys:
+            del self.blocked_waypoints[key]
+
+    def blocked_waypoint_coords(self):
+        self.prune_blocked_waypoints()
+        return [np.array(key) for key in self.blocked_waypoints.keys()]
+
+    def reset_near_stuck_tracker(self):
+        self.near_stuck_waypoint_key = None
+        self.near_stuck_start_time = None
+        self.near_stuck_best_dist = None
+
+    def update_near_stuck_skip(self):
+        if not self.enable_near_stuck_skip:
+            return
+        if self.next_waypoint is None or self.robot_location is None:
+            self.reset_near_stuck_tracker()
+            return
+
+        now = time.time()
+        self.prune_blocked_waypoints(now)
+        waypoint_key = self.waypoint_key(self.next_waypoint)
+        dist = np.linalg.norm(self.next_waypoint - self.robot_location)
+        trigger_dist = self.near_stuck_distance
+        if trigger_dist <= 0.0:
+            trigger_dist = parameter.THR_TO_WAYPOINT
+
+        if dist > trigger_dist:
+            self.reset_near_stuck_tracker()
+            return
+
+        if waypoint_key != self.near_stuck_waypoint_key:
+            self.near_stuck_waypoint_key = waypoint_key
+            self.near_stuck_start_time = now
+            self.near_stuck_best_dist = dist
+            return
+
+        if self.near_stuck_best_dist is None or self.near_stuck_best_dist - dist >= self.near_stuck_min_progress:
+            self.near_stuck_start_time = now
+            self.near_stuck_best_dist = dist
+            return
+
+        stuck_time = now - self.near_stuck_start_time
+        if stuck_time < self.near_stuck_timeout:
+            return
+
+        self.blocked_waypoints[waypoint_key] = now + self.near_stuck_blacklist_duration
+        self.next_waypoint_list = []
+        self.get_logger().warning(
+            "Near-stuck waypoint skipped: "
+            f"waypoint={waypoint_key}, dist={dist:.2f} m, "
+            f"stuck_time={stuck_time:.1f} s, "
+            f"blacklist={self.near_stuck_blacklist_duration:.1f} s")
+        self.reset_near_stuck_tracker()
+
+    def apply_blocked_waypoints(self):
+        if not self.enable_near_stuck_skip or self.robot is None:
+            return
+        self.prune_blocked_waypoints()
+        if not self.blocked_waypoints:
+            return
+
+        blocked_keys = set(self.blocked_waypoints.keys())
+        for key in blocked_keys:
+            node = self.robot.node_manager.nodes_dict.find(key)
+            if node is not None:
+                node.data.set_visited()
+            key_node = self.robot.node_manager.key_node_dict.get(key)
+            if key_node is not None:
+                key_node.utility = 0
+                key_node.visited = 1
+
+        if self.robot.key_node_coords is None or self.robot.key_utility is None:
+            return
+        for i, coords in enumerate(self.robot.key_node_coords):
+            if self.waypoint_key(coords) in blocked_keys:
+                self.robot.key_utility[i] = 0
+                if self.robot.key_guidepost is not None:
+                    self.robot.key_guidepost[i] = 1
+
     def run(self):
         if self.map_info is None or self.robot_location is None:
             return 
@@ -143,6 +252,7 @@ class Runner(Node):
             self.publish_exploration_state()
             return
         self.publish_exploration_state()
+        self.update_near_stuck_skip()
 
         if self.save_mode:
             if np.linalg.norm(self.next_waypoint - self.robot_location) > parameter.THR_TO_WAYPOINT:
@@ -201,6 +311,7 @@ class Runner(Node):
                 robot_node_location = node_coords
 
         self.robot.update_planning_state(self.map_info, robot_node_location)
+        self.apply_blocked_waypoints()
 
         if sum(self.robot.key_utility) == 0:
             self.get_logger().info("\033[92mExploration Completed\033[0m")
@@ -213,9 +324,11 @@ class Runner(Node):
 
         t2 = time.time()
         observation = self.robot.get_observation(self.robot_location)
+        blocked_coords = self.blocked_waypoint_coords() if self.enable_near_stuck_skip else None
         t3 = time.time()
 
-        next_location, next_node_index = self.robot.select_next_waypoint(observation)
+        next_location, next_node_index = self.robot.select_next_waypoint(
+            observation, blocked_coords=blocked_coords)
 
         self.next_waypoint_list.append(next_location)
         if len(self.history_waypoint_list) > 0:
@@ -226,7 +339,8 @@ class Runner(Node):
 
         if self.robot.node_manager.nodes_dict.find(next_location.tolist()).data.utility == 0:
             next_observation = self.robot.get_next_observation(next_node_index, observation)
-            next_next_location, _ = self.robot.select_next_waypoint(next_observation)
+            next_next_location, _ = self.robot.select_next_waypoint(
+                next_observation, blocked_coords=blocked_coords)
 
             if np.linalg.norm(next_location - self.robot_location) < parameter.NODE_RESOLUTION:
                 self.next_waypoint_list = []

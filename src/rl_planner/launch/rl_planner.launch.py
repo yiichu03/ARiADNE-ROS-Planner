@@ -30,6 +30,36 @@ def generate_launch_description():
         description='Path planning node resolution in meters'
     )
 
+    enable_near_stuck_skip_arg = DeclareLaunchArgument(
+        'enable_near_stuck_skip',
+        default_value='false',
+        description='Skip/temporarily down-weight a near waypoint if progress stalls'
+    )
+
+    near_stuck_distance_arg = DeclareLaunchArgument(
+        'near_stuck_distance',
+        default_value='1.0',
+        description='Distance threshold for near-stuck waypoint detection'
+    )
+
+    near_stuck_timeout_arg = DeclareLaunchArgument(
+        'near_stuck_timeout',
+        default_value='10.0',
+        description='Seconds without sufficient progress before skipping a near waypoint'
+    )
+
+    near_stuck_min_progress_arg = DeclareLaunchArgument(
+        'near_stuck_min_progress',
+        default_value='0.15',
+        description='Minimum distance improvement that resets the near-stuck timer'
+    )
+
+    near_stuck_blacklist_duration_arg = DeclareLaunchArgument(
+        'near_stuck_blacklist_duration',
+        default_value='45.0',
+        description='Seconds to keep a skipped waypoint down-weighted'
+    )
+
     octomap_node = Node(
         package='octomap_server',
         executable='octomap_server_node',
@@ -65,6 +95,11 @@ def generate_launch_description():
             {'frontier_downsample_factor': 1},
             {'map_resolution': LaunchConfiguration('map_resolution')},
             {'waypoint_threshold': 2.0},
+            {'enable_near_stuck_skip': LaunchConfiguration('enable_near_stuck_skip')},
+            {'near_stuck_distance': LaunchConfiguration('near_stuck_distance')},
+            {'near_stuck_timeout': LaunchConfiguration('near_stuck_timeout')},
+            {'near_stuck_min_progress': LaunchConfiguration('near_stuck_min_progress')},
+            {'near_stuck_blacklist_duration': LaunchConfiguration('near_stuck_blacklist_duration')},
             {'next_waypoint_threshold': 4.0},
             {'hard_update_threshold': 10.0},
             {'frontier_cluster_range': 10.0},
@@ -88,8 +123,12 @@ def generate_launch_description():
         sensor_range_arg,
         map_resolution_arg,
         node_resolution_arg,
+        enable_near_stuck_skip_arg,
+        near_stuck_distance_arg,
+        near_stuck_timeout_arg,
+        near_stuck_min_progress_arg,
+        near_stuck_blacklist_duration_arg,
         octomap_node,
         rl_planner_node,
         rviz_node
     ])
-
